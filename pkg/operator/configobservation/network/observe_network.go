@@ -1,6 +1,8 @@
 package network
 
 import (
+	"net"
+
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/openshift/library-go/pkg/operator/configobserver"
@@ -73,30 +75,56 @@ func ObserveRestrictedCIDRs(genericListers configobserver.Listers, recorder even
 }
 
 // ObserveServicesSubnet watches the network configuration and generates the
-// servicesSubnet
+// servicesSubnet (and bindAddress)
 func ObserveServicesSubnet(genericListers configobserver.Listers, recorder events.Recorder, existingConfig map[string]interface{}) (map[string]interface{}, []error) {
 	listers := genericListers.(configobservation.Listers)
 
 	out := map[string]interface{}{}
-	configPath := []string{"servicesSubnet"}
-
-	prev, ok, err := unstructured.NestedString(existingConfig, configPath...)
-	if err != nil {
-		return out, []error{err}
-	}
-	if ok {
-		if err := unstructured.SetNestedField(out, prev, configPath...); err != nil {
-			return out, []error{err}
-		}
-	}
+	servicesSubnetConfigPath := []string{"servicesSubnet"}
+	bindAddressConfigPath := []string{"servingInfo", "bindAddress"}
+	bindNetworkConfigPath := []string{"servingInfo", "bindNetwork"}
 
 	errs := []error{}
+
 	serviceCIDR, err := network.GetServiceCIDR(listers.NetworkLister, recorder)
 	if err != nil {
 		errs = append(errs, err)
+
+		// Pass through existingConfig
+		prev, ok, err2 := unstructured.NestedString(existingConfig, servicesSubnetConfigPath...)
+		if ok && err2 == nil {
+			unstructured.SetNestedField(out, prev, servicesSubnetConfigPath...)
+		}
+		prev, ok, err2 = unstructured.NestedString(existingConfig, bindAddressConfigPath...)
+		if ok && err2 == nil {
+			unstructured.SetNestedField(out, prev, bindAddressConfigPath...)
+		}
+		prev, ok, err2 = unstructured.NestedString(existingConfig, bindNetworkConfigPath...)
+		if ok && err2 == nil {
+			unstructured.SetNestedField(out, prev, bindNetworkConfigPath...)
+		}
+		return out, errs
 	}
 
-	if err := unstructured.SetNestedField(out, serviceCIDR, configPath...); err != nil {
+	if err := unstructured.SetNestedField(out, serviceCIDR, servicesSubnetConfigPath...); err != nil {
+		errs = append(errs, err)
+	}
+	bindAddress := "0.0.0.0:6443"
+	bindNetwork := "tcp4"
+	// TODO: only do this in the single-stack IPv6 case once network.GetServiceCIDR()
+	// supports dual-stack
+	if serviceCIDR != "" {
+		if ip, _, err := net.ParseCIDR(serviceCIDR); err != nil {
+			errs = append(errs, err)
+		} else if ip.To4() == nil {
+			bindAddress = "[::]:6443"
+			bindNetwork = "tcp6"
+		}
+	}
+	if err := unstructured.SetNestedField(out, bindAddress, bindAddressConfigPath...); err != nil {
+		errs = append(errs, err)
+	}
+	if err := unstructured.SetNestedField(out, bindNetwork, bindNetworkConfigPath...); err != nil {
 		errs = append(errs, err)
 	}
 
